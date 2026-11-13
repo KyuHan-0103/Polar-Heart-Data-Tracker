@@ -1,0 +1,9 @@
+.tooling/
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+# Never commit participant data
+H10_Data/
