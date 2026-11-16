@@ -1,165 +1,181 @@
-The purpose of this script/project is to pull heart rate data from Polar devices. Particularly from Polar H10. This data will then be used for research purposes.
-The current references as to how to utilize the Polar API is through this github repo: https://github.com/polarofficial/polar-ble-sdk
+The purpose of this project is to pull heart rate data from Polar devices, particularly the Polar H10. The data is used for research.
+It is a Python program that runs on a computer (macOS, Windows or Linux) with Bluetooth, using [bleak](https://github.com/hbldh/bleak)
+and [bleakheart](https://github.com/fsmeraldi/bleakheart). Polar's own SDK (https://github.com/polarofficial/polar-ble-sdk) is Android/iOS only.
+It documents the H10's Bluetooth protocol, which bleakheart implements.
 
-We only want Heart Rate and RR intervals
-Raw ECG and accelerometer signals are uneeded at the moment
+We only want Heart Rate and RR intervals. Raw ECG can be switched on (off by default). Accelerometer is not used.
 
 The raw files should NEVER be edited. Cleaning and analysis go in a separate folder, produced by scripts.
-Participants should only be identified by code. No names or birthdates in files or filenames. 
+Participants are only identified by code. No names or birthdates in files or filenames (and never type one into a marker note).
 
-Here is the target structure of the program (up for edits):
-app/src/
-├── main/
-│   ├── AndroidManifest.xml          # Bluetooth permissions, foreground service
-│   ├── res/xml/data_extraction_rules.xml  # no cloud backup / device transfer of participant data
-│   └── java/com/example/h10recorder/
-│       ├── MainActivity.kt
-│       ├── sensor/
-│       │   ├── HrSensor.kt          # interface the app uses; lets tests swap in a fake H10
-│       │   └── PolarSensor.kt       # only file using the SDK: search, connect, HR stream, battery
-│       ├── recording/
-│       │   ├── RecordingService.kt  # foreground service so recording survives the screen turning off
-│       │   ├── SessionRecorder.kt   # collects the stream, writes rows, logs events and disconnects
-│       │   └── CsvWriter.kt         # buffered writes, flushed every few seconds
-│       ├── data/
-│       │   ├── Models.kt            # HrRow, RrRow, EventRow, SessionInfo
-│       │   ├── SessionFiles.kt      # folder/file naming, ID validation, sessions.csv, zip export
-│       │   └── TimeUtils.kt         # phone clock -> UTC + elapsed time, RR unit conversion
-│       └── ui/
-│           ├── SetupScreen.kt       # participant + session IDs, pick the sensor
-│           ├── RecordingScreen.kt   # live HR, timer, event buttons, stop
-│           ├── SessionsScreen.kt    # past sessions, export
-│           └── RecordingViewModel.kt
-├── test/                            # JVM unit + wiring tests, run on the Mac (no phone, no H10)
-│   └── java/com/example/h10recorder/
-│       ├── testutil/                # FakeHrSensor, FakeClock, H10Fixtures, CsvTestUtils
-│       ├── data/                    # TimeUtils, Models, SessionFiles
-│       ├── recording/               # CsvWriter, SessionRecorder (fake H10 -> files on disk)
-│       └── sensor/                  # Polar SDK sample -> app sample mapping
-└── androidTest/                     # on a phone with a real H10; skipped unless a device ID is given
-    └── java/com/example/h10recorder/sensor/H10HardwareTest.kt
+## Structure (up for edits)
+```
+├── requirements.txt          # bleak, bleakheart (exact versions)
+├── requirements-dev.txt      # pytest, pytest-asyncio
+├── pytest.ini
+├── README.md                 # this file: how to run a session, how the code works
+├── SPEC.md                   # platform and H10 constraints
+├── DATA_NOTES.md             # how times, RR precision and beat times work (draft codebook)
+├── h10_recorder/
+│   ├── __init__.py
+│   ├── __main__.py           # entry point: python -m h10_recorder --participant P001 --session 01
+│   ├── config.py             # every knob: sensor name prefix, data folder, ECG on/off, flush interval, timeouts, IDs
+│   ├── models.py             # dataclasses: queue items, HRRow, RRRow, ECGRow, EventRow, SessionInfo
+│   ├── clock.py              # the one place timestamps become time_utc and elapsed_s (+ beat/ECG sample times)
+│   ├── sensor.py             # only module importing bleak/bleakheart: find, connect, stream, reconnect, stop
+│   ├── markers.py            # experimenter markers typed in the terminal
+│   ├── recorder.py           # takes labeled items off the queue, turns them into rows
+│   ├── storage.py            # session folder and file naming, ID checks, CSV writers, session.json, sessions.csv
+│   └── session.py            # wires everything together
+└── tests/
+    ├── conftest.py           # FakeClock, CSV readers
+    ├── test_clock.py         # time formatting, session timeline, beat and ECG sample times
+    ├── test_models.py        # row formatting, exact rr_ms, session.json round trip
+    ├── test_storage.py       # file naming, ID rules, CSV formatting, writer, session.json, sessions.csv
+    ├── test_recorder.py      # feed sample queue items, check the rows that come out
+    ├── test_sensor.py        # HR packet decoding; connect/reconnect/stop against a fake Bluetooth client
+    ├── test_session.py       # wiring: a fake strap -> real files on disk; start/stop times; cleanup
+    └── test_hardware.py      # real H10; skipped unless H10_DEVICE_ID is set
+```
 
-Here is the current suggested structure of the data:
+How data flows:
+```
+ H10 --Bluetooth--> sensor.py --+                                  +--> hr.csv / rr.csv / ecg.csv
+                                +--> asyncio.Queue --> recorder.py +--> events.csv
+ keyboard --------> markers.py -+   (labeled items,               |
+ Ctrl+C ----------> session.py -+    stamped on arrival)          session.py: session.json, sessions.csv
+```
+
+## Data layout
+Saved in the computer's **Downloads folder**: `~/Downloads/H10_Data/` (change with `--data-root` or `DATA_ROOT` in `config.py`).
+```
 H10_Data/
-├── README.md                             # codebook: every file, column, unit, clock
-├── sessions.csv                          # one row per session: IDs, date, duration, notes
+├── README.md                             # codebook: every file, column, unit, clock (to write, from DATA_NOTES.md)
+├── sessions.csv                          # one row per session: IDs, device, start_utc, end_utc, duration_s, stop_reason, notes
 └── sub-P001/
     └── ses-01/
-        ├── sub-P001_ses-01_session.json  # metadata for this recording
+        ├── sub-P001_ses-01_session.json  # metadata: start_utc, end_utc, duration_s, stop_reason, software versions
         ├── sub-P001_ses-01_hr.csv        # time_utc, elapsed_s, hr_bpm, contact
         ├── sub-P001_ses-01_rr.csv        # time_utc, elapsed_s, rr_ms, received_elapsed_s (one row per beat)
-        └── sub-P001_ses-01_events.csv    # time_utc, elapsed_s, event, note
+        ├── sub-P001_ses-01_events.csv    # time_utc, elapsed_s, event, note
+        └── sub-P001_ses-01_ecg.csv       # only with --ecg: time_utc, elapsed_s, ecg_uv, received_elapsed_s
+```
+**Start and stop of every session are timestamped in three places:** `session.json` (`start_utc`, `end_utc`, `duration_s`),
+`events.csv` (`recording_started` at elapsed 0 and `recording_stopped`, with the same times), and `sessions.csv`. The terminal
+also prints both, in UTC and local time. If the program is killed outright (power cut, `kill -9`), `end_utc` stays empty;
+the last row in the CSVs shows roughly when it ended.
 
 See DATA_NOTES.md for how times, RR precision and beat times work, and the temporary participant ID format.
 
-## Review tests
-`app/src/test/java/com/example/h10recorder/review/` holds tests written by an independent reviewer agent that had no part in
-writing the code. They run with the rest of the suite and stay as regression tests for the bugs they found.
+## Setup (once)
+Everything installs into a project-local virtual environment `.venv/`, nothing system-wide. Python 3.11 or newer.
+```
+python3 -m venv .venv
+source .venv/bin/activate              # Windows: .venv\Scripts\activate
+pip install -r requirements.txt -r requirements-dev.txt
+```
+macOS: the first Bluetooth use asks to allow Bluetooth for the Terminal (or your editor). Allow it, in
+System Settings → Privacy & Security → Bluetooth if you missed the prompt.
 
-## Setup and tests
-See TESTING.md. Short version:
+## Running a session
+```
+source .venv/bin/activate
+python -m h10_recorder --scan                                   # optional: list straps in range and their device IDs
+python -m h10_recorder --participant P001 --session 01          # record; add --device B5A3F42C if several straps are in range
+```
+1. Wet the strap's electrodes, put it on, then start. The program searches for 10 s, connects (up to 20 s) and prints `Started …`.
+2. **Markers:** press Enter to log a marker. Type a short note first to label it (e.g. `baseline start` then Enter).
+3. **Stop:** type `q` + Enter, or press Ctrl+C. It prints `Stopped …`, the duration and the reason.
+4. If the strap disconnects, it reconnects by itself. If it can't within 20 s, the session ends, the terminal beeps and prints a
+   warning. Data up to the drop is saved. Start again with a **new session ID**.
+5. Keep the computer awake and within Bluetooth range (~10 m). On macOS idle sleep is blocked while recording (`caffeinate`),
+   but closing the lid still sleeps the Mac and drops the connection.
 
-    source env.sh                  # project-local toolchain, like activating a venv
-    ./gradlew testDebugUnitTest    # all JVM tests, no phone or H10 needed
+Exit codes: 0 stopped by user, 1 error, 2 connection lost, 3 did not start (no strap, bad ID, session already exists).
+Options: `--ecg` also records ECG, `--notes "..."` adds a session note, `-v` shows Bluetooth debug messages.
+
+## Tests
+```
+pytest                                         # all tests, no strap needed (~2 s)
+H10_DEVICE_ID=B5A3F42C pytest tests/test_hardware.py -s    # with a worn H10: streaming, restart, ECG
+```
+Everything except `test_hardware.py` runs without Bluetooth: `sensor.py` is tested against a fake bleak client, and
+the wiring (`test_session.py`) uses a fake strap that writes real files into a temporary folder. The fake clock (`tests/conftest.py`)
+lets tests set exact times. The hardware tests **have not been run yet** (no strap available while writing).
 
 ## How it works: contracts
-These are the rules each part promises the rest of the program. Each rule has a test (in brackets), so
-breaking one fails the test suite. ✅ = written, ⏳ = rule and tests exist, code not written yet.
+Rules each module promises the rest of the program. The test that checks each rule is in brackets, so breaking a
+rule fails the suite.
 
-### Sensor: `sensor/HrSensor.kt`, `sensor/PolarSensor.kt` ✅
-- `PolarSensor.kt` is the **only** file that imports the Polar SDK. Everything else uses the `HrSensor` interface.
-- **The stream always stops before disconnecting.** `disconnect()` calls `stopHrStreaming()` first, then
-  `disconnectFromDevice()`. If stopping fails, disconnecting still happens. Safe to call when already disconnected.
-  When the link is already gone, the stop call is skipped (no stream can be running, and the SDK would block for 10 s). [PolarSensorTest]
-- `connect()` returns only when the strap is ready to stream HR (the SDK's `FEATURE_HR` ready callback), not
-  just when the Bluetooth link is up. It has no timeout of its own. The caller sets one. If it is cancelled
-  (timed out or Stop), the connection attempt is abandoned, so the SDK isn't left connecting in the background. [PolarSensorTest]
-- `hrStream()` throws `SensorConnectionLost` when the connection drops. Counted as a drop:
-  - the stream just ending;
-  - SDK disconnect errors;
-  - the SDK *cancelling* its HR channel, which is how SDK 8.5.0 reports a lost link;
-  - "service not available / notification not enabled / device not found" after a slow GATT setup.
+### `sensor.py`
+- The **only** module importing bleak/bleakheart. The strap is found by its advertised name `Polar H10 <device ID>`, never a hard-coded address. [test_session]
+- HR packets are decoded here (Bluetooth SIG Heart Rate Measurement) and **not** with `bleakheart.HeartRate`, because bleakheart rounds RR to
+  whole ms and stamps packets with the wall clock (`bleakheart/_core.py`). RR stays in raw 1/1024 s units. Contact is `True`/`False`, or `None` if not reported. [test_sensor: decode_*]
+- Every packet is stamped with the monotonic clock **the moment it arrives**, then put on the queue as an `HrPacket`. Malformed packets are dropped. [test_sensor]
+- `connect()` connects, starts HR notifications (and ECG if on), reads the battery. Connection errors (`BleakError`, `OSError`, timeouts) are retried every 1 s for up to 20 s,
+  then it raises `SensorError`. A hanging attempt is abandoned at the deadline and its half-open link is closed. Any other error is a bug and is raised at once. [test_sensor]
+- `watch()` runs during the session. On a drop it queues `Disconnected`, then reconnects (first try after 1 s, up to 20 s): `Connected` on success, `ReconnectFailed` and return if not.
+  A drop during connection setup is not missed. [test_sensor]
+- **`stop()` stops the streams before disconnecting:** ECG stream stop → HR notifications stop → disconnect. Each step has a 5 s timeout and errors are logged, not raised,
+  so the next step still runs. Safe to call any number of times. After `stop()` the object is finished and won't reconnect. Our own disconnect is not reported as a drop. [test_sensor]
 
-  Any other error is treated as unexpected. Cancelling the collection stops the stream. [PolarSensorTest, ReviewSdkDisconnectTest]
-- `events` emits `Connected` once per connection and `Disconnected` once (with the SDK's reason), only for a connection that was ready. [PolarSensorTest]
-- The SDK's own automatic reconnection is **off**. `SessionRecorder` owns reconnecting. [PolarSensorTest]
-- RR intervals are passed on as raw 1/1024 s values. The SDK's rounded `rrsMs` is ignored. [PolarSensorMappingTest]
-- `batteryLevel()` returns 0–100, or null if unknown. [PolarSensorTest]
+### `markers.py`
+- Enter = marker (optional note), `q`/`quit`/`stop` = Stop. The time is taken when Enter is pressed, not when the line is processed. [test_session: marker_*]
+- Reads on a daemon thread, so a pending read never keeps the program from exiting.
 
-### Data: `data/` ✅
-- **Raw data is never overwritten.** `createSessionDir` refuses an existing session folder, and `CsvWriter` refuses an existing file. [SessionFilesTest, CsvWriterTest]
-- `session.json` is written at start (`end_utc` null) and replaced once at the end. Each write goes to a temp file, which is saved to storage (fsync) and then renamed, so neither a crash nor a power cut can leave a half-written file. [SessionFilesTest]
-- IDs use ASCII digits only (`[0-9]`, since `\d` also matches e.g. Arabic-Indic digits on Android) and are checked before any file path is built, so text like `../` can't reach the file system. Error messages never repeat the
-  rejected text (in case a name was typed). [SessionFilesTest]
-- Times: `time_utc` is ISO-8601 UTC, milliseconds, truncated. `elapsed_s` has 3 decimals, also truncated, so `time_utc` = start + `elapsed_s` exactly in every row. Numbers always use `.` whatever
-  the phone's language. Times come from one clock reading at session start plus the monotonic clock. [TimeUtilsTest, ModelsTest]
-- `rr_ms` is exact (raw × 1000 / 1024), never rounded. Beat times come from `BeatTimeline` (see DATA_NOTES.md). [BeatTimelineTest]
-- CSV: UTF-8, header first, `\n` line endings, RFC 4180 quoting (fields with `,` `"` or newlines are quoted). [ModelsTest, CsvWriterTest]
-- `sessions.csv` is append-only: one row per finished session. Zip export only reads session files and must be saved outside `H10_Data/`. [SessionFilesTest]
+### `clock.py`
+- One wall-clock reading at session start, truncated to the millisecond. Every other time is start + monotonic elapsed, so a clock sync mid-session can't make `time_utc` jump. [test_clock]
+- The monotonic clock keeps counting while the computer sleeps. On macOS Python's `time.monotonic()` stops during sleep, so `CLOCK_MONOTONIC` is used (`man 3 clock_gettime`). [test_clock]
+- `time_utc`: ISO 8601 UTC, 3 decimals, truncated. `elapsed_s`: 3 decimals, truncated. So `time_utc` = start + `elapsed_s` to the millisecond in every row, and numbers always use `.`. [test_clock]
+- `BeatTimeline` places each beat (method and accuracy: DATA_NOTES.md). `EcgTimeline` places ECG samples from the sensor's sample clock. [test_clock]
 
-### Recording: `recording/` ✅
-**`CsvWriter.kt`**
-- Opens files with `CREATE_NEW`, so the operating system itself refuses to overwrite an existing file. The header is written and saved straight away. [CsvWriterTest]
-- Rows are buffered and flushed every 5 s, on `flush()`, and on `close()`. Every flush is also forced to storage (fsync).
-  `flushIfDue()` lets the recorder flush all three files on every HR packet, so a quiet file (events, rr) doesn't sit in memory.
-  `writeIfOpen()` returns false instead of throwing once the file is closed. [CsvWriterTest, ReviewSessionRecorderTest]
-- A row must have as many fields as the header. Writing after `close()` fails, and closing twice is fine. Safe to use from several threads. [CsvWriterTest]
+### `models.py`
+- Queue items (`HrPacket`, `EcgFrame`, `Connected`, `Disconnected`, `ReconnectFailed`, `Marker`, `StopRequested`) each carry the monotonic time they happened.
+- Rows (`HRRow`, `RRRow`, `ECGRow`, `EventRow`) each have `HEADER` and `fields()`. `rr_ms` is exact decimal text, never rounded (840 → `820.3125`). [test_models]
+- `SessionInfo` ↔ `session.json`, with times as `time_utc` strings and `end_utc` null until the end. [test_models]
 
-**`SessionRecorder.kt`**: `run(config)` does, in order:
-1. Checks the IDs and that the session doesn't exist yet, **before connecting**. [SessionRecorderTest]
-2. Connects. Failed attempts are retried every 1 s for up to 20 s. If that fails: status `Stopped(CONNECTION_LOST)`, **nothing is written**, and the session ID stays free. [SessionRecorderTest]
-3. Creates the session folder, `session.json` and the three CSVs. Logs `recording_started` and `connected`. Status `Recording`.
-4. For each HR packet: one `hr.csv` row (packet arrival time), one `rr.csv` row per beat (time from `BeatTimeline`), `liveHr` updated. A beat-chain resync logs `rr_resync`. [SessionRecorderTest]
-5. **Connection dropped** (`SensorConnectionLost`): flush all files to disk at once, log `disconnected` (note = the error message), set `liveHr` to null, status `Reconnecting`,
-   restart the beat chain, then wait 1 s and retry every 1 s for up to 20 s.
-   - Back: log `connected`, status `Recording`, continue.
-   - Not back: log `reconnect_failed`, end the session, status `Stopped(CONNECTION_LOST)`. `run()` returns normally. [SessionRecorderTest]
-6. Only connection-type errors (`IOException`) are retried. Any other error ends the session: status `Stopped(ERROR)`, and the error is passed on. Data before the error is kept. [SessionRecorderTest]
-   - **Every** way out of `run()` leaves a `Stopped` status for the UI, including errors before any file exists: bad IDs, a blank device ID, an existing session, an SDK error while connecting. [ReviewSessionRecorderTest]
-   - A cancellation counts as Stop **only if the recorder's own coroutine was cancelled**. One arriving from elsewhere (e.g. the SDK) is reported as `Stopped(ERROR)`, never as a silent Stop. [ReviewSdkDisconnectTest]
-7. **Cleanup always runs** (Stop, give-up or crash), even while being cancelled, in this order:
-   stop stream + disconnect → log `recording_stopped` (note = reason) → close the 3 CSVs → write `end_utc` to `session.json` → append to `sessions.csv`.
-   Every step runs even if an earlier one fails. Any cleanup failure turns the status into `Stopped(ERROR, "Cleanup failed: …")`. [SessionRecorderTest]
-- **Stop = cancel the coroutine running `run()`.** `logEvent()` (marker buttons) can be called from any thread, but not the main thread, because it writes to disk.
-  Each event is forced to disk immediately. It is ignored (never throws) when no session is open, including while Stop's cleanup is closing the files. [ReviewSessionRecorderTest]
-- `run()` does no thread switching. The caller (`RecordingService`) runs it on `Dispatchers.IO`. A recorder runs one session at a time.
+### `storage.py`
+- IDs are checked (pattern in `config.py`, ASCII digits only) before any path is built, so text like `../` can't reach the file system. Error messages never repeat the rejected text. [test_storage]
+- **Raw data is never overwritten:** the session folder must not exist, and data files are opened in exclusive-create mode (`'x'`), so the OS refuses an existing file. [test_storage]
+- `CsvWriter`: header written and fsynced at once. Rows are buffered and flushed + fsynced every 5 s (checked on each write and `flush_if_due()`), on `flush()`, on `close()`,
+  or right away with `write(..., flush_now=True)`. Column count is checked. `close()` twice is fine, writing after close fails. UTF-8, `\n`, RFC 4180 quoting. [test_storage]
+- `session.json` is written at start and replaced once at the end, via temp file + fsync + atomic rename, so it is never half-written. [test_storage]
+- `sessions.csv` is append-only, header once, one row per finished session, fsynced. [test_storage]
 
-**`RecordingService.kt`** (Android foreground service; only its wording is unit-tested [RecordingNotificationsTest])
-- `RecordingService.start(context, participant, session, deviceId, notes)` / `RecordingService.stop(context)`. One recording at a time.
-  Every start request is answered with `startForeground` at once, even one that's ignored, because Android crashes an app that doesn't.
-  A stop with nothing running just closes the service.
-  The UI reads `RecordingService.activeRecorder` for live HR and status.
-- Its job is `superviseRecording()`: run the recorder with the notification updater alongside, then **always** run the
-  finish step exactly once, after the updater has stopped, however recording ended. The finish step shows the alert,
-  releases the wake lock and stops the service. It runs even after Stop, when the coroutine is already cancelled. [RecordingJobTest, ReviewFollowUpTest]
-- Shows a permanent notification with live HR and status. If recording ends for any reason other than Stop
-  (connection lost, error), it shows a **high-priority, vibrating "Recording stopped" alert**.
-- Holds a partial wake lock while recording. A foreground service keeps the app alive, but not the CPU awake, and
-  without the lock the 1 s / 20 s reconnect timers could be delayed while the phone sleeps. The lock is capped at 12 h.
-- Not restarted automatically if Android kills it (`START_NOT_STICKY`), because a restarted recording would need a new session ID. If Android destroys it
-  mid-recording, it cancels the recorder and waits up to 3 s for cleanup before shutting down the SDK.
-- Before `start`, the UI must have the Bluetooth permissions (Android 14 refuses the service otherwise) and should have notification permission (for the alert).
-- Data goes to the app's own storage: `Android/data/com.example.h10recorder/files/H10_Data/`. **Android deletes this if the app is uninstalled.** Export first.
-- App data is excluded from cloud backup and device-to-device transfer (`res/xml/data_extraction_rules.xml`). It leaves the phone only through export.
+### `recorder.py`
+- Pure: no Bluetooth, no terminal. `handle(item)` writes rows and returns a stop reason for `StopRequested` (user) and `ReconnectFailed` (connection_lost). An unknown item is a bug (`TypeError`). [test_recorder]
+- `HrPacket` → one `hr.csv` row at its arrival time, one `rr.csv` row per beat at its estimated time (`received_elapsed_s` = packet arrival), `rr_resync` event if the chain re-anchored.
+  Then every file gets `flush_if_due()`, so a quiet file (rr, events) still reaches disk within 5 s. [test_recorder]
+- Every event is forced to disk immediately. [test_recorder]
+- `Disconnected` → flush every file to disk, log `disconnected`, restart the beat chain and ECG timeline. `Connected` → log `connected`. [test_recorder]
+
+### `session.py`: `run_session(...)`, in order
+1. Checks the IDs and that the session folder doesn't exist yet, **before** touching Bluetooth. [test_session]
+2. Finds the strap (exactly one, or the one given by `--device`) and connects. **If this fails, nothing is written** and the session ID stays free. [test_session]
+3. Creates the folder, `session.json` (`start_utc` = when connecting began), and the CSVs. Logs `recording_started` (elapsed 0) and `connected` (note: battery %). Prints `Started`. [test_session]
+4. Records until Stop (`q`, Ctrl+C), `ReconnectFailed`, or an error. Prints HR every 30 s. Ctrl+C is turned into a normal Stop, so files close properly.
+5. **Cleanup always runs**, also on errors and cancellation, in this order: stop streams + disconnect → write packets still in the queue →
+   log `recording_stopped` (note = reason) → close CSVs → `session.json` gets `end_utc`, `duration_s`, `stop_reason` → append to `sessions.csv`.
+   Every step runs even if an earlier one fails. Failures are printed, and the session's `stop_reason` becomes `error`. `recording_stopped` and `end_utc` are the same clock reading. [test_session]
+6. Connection lost → terminal beep plus a warning to start a new session ID. [test_session]
 
 ## Settings you can change (knobs)
-| Setting | Current | Where |
-|---|---|---|
-| Give up (re)connecting after | 20 s | `CONNECTION_TIMEOUT` in `recording/SessionRecorder.kt` |
-| Pause between reconnect attempts | 1 s | `RETRY_DELAY` in `recording/SessionRecorder.kt` |
-| CSV flush interval | 5 s | `DEFAULT_FLUSH_INTERVAL_NANOS` in `recording/CsvWriter.kt` |
-| Beat-chain resync threshold | 2 s | `DEFAULT_GAP_RESET_S` in `data/TimeUtils.kt` (`BeatTimeline`) |
-| Beat-chain offset window | 300 s | `DEFAULT_WINDOW_S` in `data/TimeUtils.kt` (`BeatTimeline`); trade-off in DATA_NOTES.md |
-| Packet gap counted as "on schedule" | ≤ 1.25 s | `REGULAR_GAP_S` in `data/TimeUtils.kt` (`BeatTimeline`) |
-| Participant / session ID format (TEMPORARY) | `P001` / `01` | `Ids` in `data/SessionFiles.kt`; search `ID-FORMAT` |
-| Strap name used when searching | `Polar H10` | `H10_NAME_PREFIX` in `sensor/PolarSensor.kt` |
-| SDK features enabled | HR, battery | `FEATURES` in `sensor/PolarSensor.kt` |
-| Polar SDK version | 8.5.0 | `polarSdk` in `gradle/libs.versions.toml` |
-| Minimum Android version | 33 (Android 13) | `minSdk` in `app/build.gradle.kts` (Polar SDK requires ≥ 33) |
-| Wake lock safety cap (longest recording kept awake) | 12 h | `MAX_RECORDING_MS` in `recording/RecordingService.kt` |
-| Where data is stored on the phone | app storage `H10_Data/` | `dataRoot()` in `recording/RecordingService.kt` |
-| Notification wording | | `RecordingNotifications` in `recording/RecordingService.kt` |
-| Hardware test timeouts | 20–30 s | `withTimeout(...)` in `androidTest/.../H10HardwareTest.kt` |
+All in `h10_recorder/config.py`. Tests read the constants, so they follow a change, apart from the ID-format tests, which list example IDs.
 
-When you change a knob, run the tests. Tests that check the old value (e.g. the 20 s give-up) read the constant, so
-they follow the change, apart from the ID-format tests, which list example IDs.
+| Setting | Current | Name in `config.py` |
+|---|---|---|
+| Where data is saved | `~/Downloads/H10_Data` | `DATA_ROOT` (or `--data-root`) |
+| Record ECG too | off | `ECG_ENABLED` (or `--ecg`) |
+| Give up (re)connecting after | 20 s | `CONNECT_TIMEOUT_S` |
+| Pause between connect attempts | 1 s | `RETRY_DELAY_S` |
+| Search time | 10 s | `SCAN_TIMEOUT_S` |
+| CSV flush interval (max data lost in a crash) | 5 s | `FLUSH_INTERVAL_S` |
+| Beat-chain resync threshold | 2 s | `BEAT_GAP_RESET_S` |
+| Beat-time look-back window (**revisit with real data**) | 300 s | `BEAT_WINDOW_S`; trade-off in DATA_NOTES.md |
+| Packet gap counted as "on schedule" | ≤ 1.25 s | `BEAT_REGULAR_GAP_S` |
+| Participant / session ID format (TEMPORARY) | `P001` / `01` | `PARTICIPANT_ID_PATTERN`, `SESSION_ID_PATTERN`; search `ID-FORMAT` |
+| Strap name used when searching | `Polar H10` | `SENSOR_NAME_PREFIX` |
+| ECG sample rate | 130 Hz | `ECG_SAMPLE_RATE_HZ` |
+| HR status line in the terminal | every 30 s | `STATUS_EVERY_S` in `session.py` |
+| Timeout of each stop/disconnect step | 5 s | `STOP_STEP_TIMEOUT_S` in `sensor.py` |
+| Library versions | bleak 3.1.0, bleakheart 0.2.0 | `requirements.txt` |

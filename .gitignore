@@ -7,3 +7,6 @@ local.properties
 .DS_Store
 # Never commit participant data
 H10_Data/
+.venv/
+__pycache__/
+.pytest_cache/
