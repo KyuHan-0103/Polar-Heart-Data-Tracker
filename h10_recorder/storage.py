@@ -157,3 +157,13 @@ def append_sessions_index(root: Path, info: SessionInfo) -> None:
         f.write(text)
         f.flush()
         os.fsync(f.fileno())
+
+
+def next_session_id(root: Path, participant_id: str) -> str:
+    """The next unused session number for a participant (01 if none yet), suggested by the window.
+    ID-FORMAT: assumes 2-digit session numbers; change with SESSION_ID_PATTERN in config.py."""
+    require_valid_ids(participant_id, config.SESSION_ID_EXAMPLE)
+    folder = Path(root) / f"sub-{participant_id}"
+    used = [int(p.name[4:]) for p in folder.glob("ses-*")
+            if re.fullmatch(config.SESSION_ID_PATTERN, p.name[4:], flags=re.ASCII)] if folder.is_dir() else []
+    return f"{max(used, default=0) + 1:02d}"

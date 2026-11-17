@@ -9,8 +9,8 @@ import asyncio
 
 from .clock import BeatTimeline, EcgTimeline, SessionTimeline
 from .models import (
-    Connected, Disconnected, ECGRow, EcgFrame, EventRow, Events, HRRow, HrPacket, Marker, QueueItem,
-    ReconnectFailed, RRRow, StopReason, StopRequested,
+    Connected, Disconnected, ECGRow, EcgFrame, EventRow, Events, HRRow, HrPacket, LiveStatus, Marker, Phase,
+    QueueItem, ReconnectFailed, RRRow, StopReason, StopRequested,
 )
 from .storage import CsvWriter
 
@@ -18,12 +18,13 @@ from .storage import CsvWriter
 class Recorder:
     def __init__(self, timeline: SessionTimeline, hr: CsvWriter, rr: CsvWriter, events: CsvWriter,
                  ecg: CsvWriter | None = None, beats: BeatTimeline | None = None,
-                 ecg_timeline: EcgTimeline | None = None) -> None:
+                 ecg_timeline: EcgTimeline | None = None, live: LiveStatus | None = None) -> None:
         self.timeline = timeline
         self.hr, self.rr, self.events, self.ecg = hr, rr, events, ecg
         self.beats = beats or BeatTimeline()
         self.ecg_timeline = ecg_timeline or EcgTimeline()
         self.last_hr: int | None = None     # for the terminal status line; None while disconnected
+        self.live = live if live is not None else LiveStatus()   # for the window
 
     @property
     def writers(self) -> list[CsvWriter]:
@@ -45,10 +46,14 @@ class Recorder:
                 self._on_ecg(item)
             case Marker(at_ns=t, note=note):
                 self.log_event(Events.MARKER, note, t)
+                self.live.markers.append((self.timeline.at(t).elapsed_s, note))
             case Connected(at_ns=t):
                 self.log_event(Events.CONNECTED, "", t)
+                self.live.phase = Phase.RECORDING
             case Disconnected(at_ns=t, reason=why):
-                self.last_hr = None
+                self.last_hr = self.live.hr_bpm = self.live.contact = None
+                self.live.phase = Phase.RECONNECTING
+                self.live.disconnects += 1
                 for w in self.writers:
                     w.flush()                   # don't leave rows in memory during the gap
                 self.log_event(Events.DISCONNECTED, why, t)
@@ -76,7 +81,8 @@ class Recorder:
             self.log_event(Events.RR_RESYNC, "beats missing; beat times re-anchored to packet arrival", p.received_ns)
         for b in result.beats:
             self.rr.write(RRRow(self.timeline.utc_ns_at(b.elapsed_s), b.elapsed_s, b.rr_raw, now.elapsed_s).fields())
-        self.last_hr = p.hr_bpm
+        self.last_hr = self.live.hr_bpm = p.hr_bpm
+        self.live.contact, self.live.last_packet_ns = p.contact, p.received_ns
         for w in self.writers:
             w.flush_if_due()                    # rr/events may not get a write of their own for a while
 

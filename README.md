@@ -8,17 +8,49 @@ We only want Heart Rate and RR intervals. Raw ECG can be switched on (off by def
 The raw files should NEVER be edited. Cleaning and analysis go in a separate folder, produced by scripts.
 Participants are only identified by code. No names or birthdates in files or filenames (and never type one into a marker note).
 
+## Recording a session (no coding needed)
+**First time on a computer:**
+1. Install Python from https://www.python.org/downloads/ (version 3.11 or newer; the standard installer includes everything).
+   On Windows, tick **"Add python.exe to PATH"** in the installer.
+2. Copy this project folder onto the computer.
+
+**Every session:**
+1. Double-click **`Start H10 Recorder.command`** (Mac) or **`Start H10 Recorder.bat`** (Windows).
+   The first time it downloads what it needs (internet, about a minute). A black text window opens: **leave it open**.
+   Mac: if it says the file can't be opened, right-click it → Open. If the Mac asks to allow Bluetooth, click Allow.
+2. **Wet the strap's electrodes** and put it on the participant. The strap only switches on when worn.
+3. In the recorder window:
+   - Type the **participant code** (like `P001`, never a name). The **session number** fills itself in with the next free number.
+   - The strap is found automatically. If several are listed, pick the ID printed on the participant's sensor.
+     If none is found, press **Search again**.
+   - Press **Start recording**.
+4. While recording the window shows:
+   - whether the strap is **connected**: green "Connected — recording", orange "Connecting…", red "Connection lost — reconnecting…";
+   - the **current heart rate** in large numbers;
+   - skin contact, recording time, start time and strap battery.
+
+   To mark a moment (e.g. a task starting), type a short note and press **Add marker** (or Enter).
+5. Press **Stop recording** and confirm. A summary shows the start and stop times, the duration, and where the files are.
+   **Open data folder** shows them. **Record another session** starts the next one.
+
+If the connection is lost and can't be restored within 20 s, the recording ends by itself, the computer beeps, and the window
+says so in red. The data up to then is saved. Start a new session with the next number.
+Keep the computer awake (don't close the lid) and within ~10 m of the strap while recording.
+
 ## Structure (up for edits)
 ```
 ├── requirements.txt          # bleak, bleakheart (exact versions)
 ├── requirements-dev.txt      # pytest, pytest-asyncio
 ├── pytest.ini
+├── Start H10 Recorder.command  # Mac: double-click to set up (first time) and open the window
+├── Start H10 Recorder.bat      # Windows: the same
 ├── README.md                 # this file: how to run a session, how the code works
 ├── SPEC.md                   # platform and H10 constraints
 ├── DATA_NOTES.md             # how times, RR precision and beat times work (draft codebook)
 ├── h10_recorder/
 │   ├── __init__.py
-│   ├── __main__.py           # entry point: python -m h10_recorder --participant P001 --session 01
+│   ├── __main__.py           # entry point: no options = window; --participant P001 --session 01 = terminal
+│   ├── ui.py                 # the recording window: setup, live status + bpm + markers, summary
 │   ├── config.py             # every knob: sensor name prefix, data folder, ECG on/off, flush interval, timeouts, IDs
 │   ├── models.py             # dataclasses: queue items, HRRow, RRRow, ECGRow, EventRow, SessionInfo
 │   ├── clock.py              # the one place timestamps become time_utc and elapsed_s (+ beat/ECG sample times)
@@ -35,6 +67,7 @@ Participants are only identified by code. No names or birthdates in files or fil
     ├── test_recorder.py      # feed sample queue items, check the rows that come out
     ├── test_sensor.py        # HR packet decoding; connect/reconnect/stop against a fake Bluetooth client
     ├── test_session.py       # wiring: a fake strap -> real files on disk; start/stop times; cleanup
+    ├── test_ui.py            # window wording, plus full runs of the real window with a fake strap
     └── test_hardware.py      # real H10; skipped unless H10_DEVICE_ID is set
 ```
 
@@ -42,8 +75,10 @@ How data flows:
 ```
  H10 --Bluetooth--> sensor.py --+                                  +--> hr.csv / rr.csv / ecg.csv
                                 +--> asyncio.Queue --> recorder.py +--> events.csv
- keyboard --------> markers.py -+   (labeled items,               |
- Ctrl+C ----------> session.py -+    stamped on arrival)          session.py: session.json, sessions.csv
+ keyboard --------> markers.py -+   (labeled items,      |         |
+ window buttons --> ui.py ------+    stamped on arrival) |        session.py: session.json, sessions.csv
+ Ctrl+C ----------> session.py -+                        v
+                         ui.py reads LiveStatus 4x/s: connection, bpm, contact, markers
 ```
 
 ## Data layout
@@ -67,8 +102,9 @@ the last row in the CSVs shows roughly when it ended.
 
 See DATA_NOTES.md for how times, RR precision and beat times work, and the temporary participant ID format.
 
-## Setup (once)
-Everything installs into a project-local virtual environment `.venv/`, nothing system-wide. Python 3.11 or newer.
+## Setup by hand (for developers)
+The launchers do this automatically. Everything installs into a project-local virtual environment `.venv/`, nothing system-wide.
+Python 3.11 or newer **with Tkinter** (python.org installers include it; Homebrew needs `brew install python-tk@3.14`).
 ```
 python3 -m venv .venv
 source .venv/bin/activate              # Windows: .venv\Scripts\activate
@@ -77,9 +113,10 @@ pip install -r requirements.txt -r requirements-dev.txt
 macOS: the first Bluetooth use asks to allow Bluetooth for the Terminal (or your editor). Allow it, in
 System Settings → Privacy & Security → Bluetooth if you missed the prompt.
 
-## Running a session
+## Running from the terminal
 ```
 source .venv/bin/activate
+python -m h10_recorder                                          # the window (same as the launchers)
 python -m h10_recorder --scan                                   # optional: list straps in range and their device IDs
 python -m h10_recorder --participant P001 --session 01          # record; add --device B5A3F42C if several straps are in range
 ```
@@ -96,7 +133,7 @@ Options: `--ecg` also records ECG, `--notes "..."` adds a session note, `-v` sho
 
 ## Tests
 ```
-pytest                                         # all tests, no strap needed (~2 s)
+pytest                                         # all tests, no strap needed (~6 s; the window tests briefly create hidden windows)
 H10_DEVICE_ID=B5A3F42C pytest tests/test_hardware.py -s    # with a worn H10: streaming, restart, ECG
 ```
 Everything except `test_hardware.py` runs without Bluetooth: `sensor.py` is tested against a fake bleak client, and
@@ -149,6 +186,15 @@ rule fails the suite.
 - Every event is forced to disk immediately. [test_recorder]
 - `Disconnected` → flush every file to disk, log `disconnected`, restart the beat chain and ECG timeline. `Connected` → log `connected`. [test_recorder]
 
+### `ui.py` (the window)
+- Touches neither files nor Bluetooth directly. It starts `run_session()` on an asyncio loop on a background thread (`AsyncRunner`), sends markers and Stop through
+  `SessionControl` (thread-safe; the marker time is when the button is clicked), and redraws from `LiveStatus` every 250 ms. Tk widgets are only touched on the main thread. [test_ui]
+- Setup: searches for straps on opening, suggests the next free session number, and checks the codes in plain language (including "already recorded, use 02") before anything starts. [test_ui]
+- Status line: Searching / Connecting (orange) → Connected — recording (green) → Connection lost — reconnecting (red, with a beep). It warns when no heart-rate data has arrived for 5 s. [test_ui]
+- Stop asks for confirmation. Cancel while connecting writes nothing. A failed start goes back to Setup with the reason. [test_ui]
+- Closing the window mid-recording asks first, then stops and saves properly before closing. [test_ui]
+- Finished page: start, stop, duration, markers, folder, and a red headline if the connection was lost or something failed. [test_ui]
+
 ### `session.py`: `run_session(...)`, in order
 1. Checks the IDs and that the session folder doesn't exist yet, **before** touching Bluetooth. [test_session]
 2. Finds the strap (exactly one, or the one given by `--device`) and connects. **If this fails, nothing is written** and the session ID stays free. [test_session]
@@ -179,3 +225,6 @@ All in `h10_recorder/config.py`. Tests read the constants, so they follow a chan
 | HR status line in the terminal | every 30 s | `STATUS_EVERY_S` in `session.py` |
 | Timeout of each stop/disconnect step | 5 s | `STOP_STEP_TIMEOUT_S` in `sensor.py` |
 | Library versions | bleak 3.1.0, bleakheart 0.2.0 | `requirements.txt` |
+| Window redraw rate | 250 ms | `REFRESH_MS` in `ui.py` |
+| "No heart rate data" warning after | 5 s | `NO_DATA_WARNING_S` in `ui.py` |
+| Window wording and colours | | top of `ui.py` (`status_view`, `summary`, `GREEN`/`ORANGE`/`RED`) |

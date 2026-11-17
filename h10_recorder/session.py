@@ -27,7 +27,8 @@ from typing import Callable
 from . import __version__, config, markers
 from .clock import SessionClock, SessionTimeline, SystemClock, format_utc
 from .models import (
-    ECGRow, EventRow, Events, HRRow, QueueItem, ReconnectFailed, RRRow, SessionInfo, StopReason, StopRequested,
+    ECGRow, EventRow, Events, HRRow, LiveStatus, Marker, Phase, QueueItem, ReconnectFailed, RRRow, SessionInfo,
+    StopReason, StopRequested,
 )
 from .recorder import Recorder
 from .storage import (
@@ -46,6 +47,32 @@ def software_versions() -> dict[str, str]:
 
 def local_time(utc_ns: int) -> str:
     return datetime.fromtimestamp(utc_ns / 1e9).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+class SessionControl:
+    """Lets another thread (the window) send markers and Stop into a running session. Works once the session
+    is recording; before that (searching/connecting) add_marker/stop return False and the caller should
+    cancel the session's task instead, which writes nothing."""
+
+    def __init__(self, clock: SessionClock) -> None:
+        self.clock = clock
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._queue: asyncio.Queue[QueueItem] | None = None
+
+    def attach(self, loop: asyncio.AbstractEventLoop, queue: asyncio.Queue[QueueItem]) -> None:
+        self._loop, self._queue = loop, queue
+
+    def _send(self, item: QueueItem) -> bool:
+        if self._loop is None or self._queue is None or self._loop.is_closed():
+            return False
+        self._loop.call_soon_threadsafe(self._queue.put_nowait, item)
+        return True
+
+    def add_marker(self, note: str) -> bool:
+        return self._send(Marker(self.clock.monotonic_ns(), note.strip()))   # time = when the button was clicked
+
+    def stop(self) -> bool:
+        return self._send(StopRequested(self.clock.monotonic_ns()))
 
 
 async def choose_sensor(device_id: str | None, finder: Callable, out: Callable[[str], None]):
@@ -77,10 +104,16 @@ async def run_session(
     read_markers: bool = True,
     keep_awake: bool = True,
     out: Callable[[str], None] = print,
+    found=None,
+    live: LiveStatus | None = None,
+    control: SessionControl | None = None,
 ) -> SessionInfo | None:
     """Records one session. Returns the final SessionInfo, or None if the strap couldn't be found/connected
-    (nothing written). Raises on invalid IDs, an existing session, or an unexpected error (after cleanup)."""
-    clock = clock or SystemClock()
+    (nothing written). Raises on invalid IDs, an existing session, or an unexpected error (after cleanup).
+    found: a strap already picked (ui.py) skips the search. live: updated for the window as things happen.
+    control: attached once recording, so the window can send markers/Stop."""
+    clock = clock or (control.clock if control else SystemClock())
+    live = live if live is not None else LiveStatus()
     paths = SessionPaths(root, participant_id, session_id)          # validates IDs
     if paths.dir.exists():
         raise SessionExistsError(f"Session folder already exists: {paths.dir}")
@@ -92,19 +125,28 @@ async def run_session(
     queue: asyncio.Queue[QueueItem] = asyncio.Queue()
 
     # 2. find + connect
-    try:
-        found = await choose_sensor(device_id, finder, out)
-    except LookupError as e:
-        out(str(e))
-        return None
+    if found is None:
+        live.phase = Phase.SEARCHING
+        try:
+            found = await choose_sensor(device_id, finder, out)
+        except LookupError as e:
+            out(str(e))
+            live.phase, live.stop_reason = Phase.STOPPED, "not_started"
+            return None
+    live.phase, live.device_id = Phase.CONNECTING, found.device_id
     out(f"Connecting to {found.name}…")
     sensor = sensor_factory(found, queue, clock, ecg=ecg)
     timeline = SessionTimeline(clock)       # session start = when we began connecting
     try:
         await sensor.connect()
+    except asyncio.CancelledError:          # cancelled while connecting (window's Cancel): nothing written
+        await sensor.stop()
+        live.phase, live.stop_reason = Phase.STOPPED, "not_started"
+        raise
     except Exception as e:                  # noqa: BLE001 - SensorError, or any SDK surprise: nothing written
         await sensor.stop()
         out(f"{e}. Nothing was recorded; session {session_id} is still unused.")
+        live.phase, live.stop_reason = Phase.STOPPED, "not_started"
         return None
 
     # 3. create the session
@@ -120,12 +162,18 @@ async def run_session(
             return writers[-1]
 
         recorder = Recorder(timeline, hr=new(HR, HRRow.HEADER), rr=new(RR, RRRow.HEADER),
-                            events=new(EVENTS, EventRow.HEADER), ecg=new(ECG, ECGRow.HEADER) if ecg else None)
+                            events=new(EVENTS, EventRow.HEADER), ecg=new(ECG, ECGRow.HEADER) if ecg else None,
+                            live=live)
     except BaseException:
         for w in writers:
             w.close()
         await sensor.stop()
+        live.phase, live.stop_reason = Phase.STOPPED, StopReason.ERROR
         raise
+    live.start_utc_ns, live.start_monotonic_ns = timeline.start_utc_ns, timeline.start_monotonic_ns
+    live.battery_pct, live.folder, live.phase = sensor.battery_pct, str(paths.dir), Phase.RECORDING
+    if control is not None:
+        control.attach(asyncio.get_running_loop(), queue)
     # 4. record. Everything from here on is inside try, so a failure at any point still cleans up.
     background: list[asyncio.Task] = []
     caffeinate = None
@@ -154,6 +202,7 @@ async def run_session(
         raise
     finally:
         # 5. always clean up, in the contract order
+        live.phase = Phase.STOPPING
         remove_sigint()
         for t in background:
             t.cancel()
@@ -183,6 +232,10 @@ async def run_session(
         step("sessions.csv", lambda: append_sessions_index(root, final))
         if caffeinate is not None:
             caffeinate.terminate()
+        live.hr_bpm = live.contact = None
+        live.stop_utc_ns, live.duration_s, live.stop_reason = stop.utc_ns, stop.elapsed_s, final.stop_reason
+        live.problems.extend(failures)
+        live.phase = Phase.STOPPED
 
         out(f"Stopped  {format_utc(stop.utc_ns)}  ({local_time(stop.utc_ns)})  after {stop.elapsed_s / 60:.1f} min"
             f"  reason: {reason}")

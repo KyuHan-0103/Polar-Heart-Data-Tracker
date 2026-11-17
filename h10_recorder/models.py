@@ -192,3 +192,41 @@ class SessionInfo:
 def _parse_utc(text: str) -> int:
     dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
     return (dt - datetime(1970, 1, 1, tzinfo=timezone.utc)) // timedelta(microseconds=1) * 1000   # exact integer
+
+
+# ---------------------------------------------------------------------------------------------
+# Live status for the window (ui.py). Written by session.py and recorder.py on the recording thread,
+# read by the window every ~0.25 s. Plain attributes only, so a read never sees a half-made object.
+# ---------------------------------------------------------------------------------------------
+
+class Phase:
+    IDLE = "idle"
+    SEARCHING = "searching"
+    CONNECTING = "connecting"
+    RECORDING = "recording"
+    RECONNECTING = "reconnecting"
+    STOPPING = "stopping"
+    STOPPED = "stopped"
+
+
+@dataclass
+class LiveStatus:
+    phase: str = Phase.IDLE
+    device_id: str | None = None
+    battery_pct: int | None = None
+    hr_bpm: int | None = None              # None while disconnected
+    contact: bool | None = None
+    last_packet_ns: int | None = None      # monotonic arrival of the latest HR packet
+    start_utc_ns: int | None = None
+    start_monotonic_ns: int | None = None
+    stop_utc_ns: int | None = None
+    duration_s: float | None = None
+    stop_reason: str | None = None
+    folder: str | None = None
+    disconnects: int = 0
+    markers: list[tuple[float, str]] = None  # (elapsed_s, note), newest last
+    problems: list[str] = None               # cleanup problems to show the user
+
+    def __post_init__(self) -> None:
+        self.markers = [] if self.markers is None else self.markers
+        self.problems = [] if self.problems is None else self.problems

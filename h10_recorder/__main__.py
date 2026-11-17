@@ -1,7 +1,7 @@
-"""Entry point:  python -m h10_recorder --participant P001 --session 01
-
-Other commands:
-  python -m h10_recorder --scan          list the H10 straps in range and their device IDs
+"""Entry point.
+  python -m h10_recorder                                       open the recording window (ui.py)
+  python -m h10_recorder --participant P001 --session 01       record in the terminal
+  python -m h10_recorder --scan                                list the H10 straps in range and their device IDs
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("-v", "--verbose", action="store_true", help="show Bluetooth debug messages")
     args = p.parse_args(argv)
     if not args.scan and (not args.participant or not args.session):
-        p.error("--participant and --session are required (or use --scan)")
+        p.error("--participant and --session are required (or use --scan, or no options for the window)")
     return args
 
 
@@ -47,10 +47,15 @@ async def scan() -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv or argv == ["--ui"]:
+        from .ui import main as window
+        return window()
     args = parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.WARNING,
                         format="%(levelname)s %(name)s: %(message)s")
     if args.scan:
+        print("Looking for Polar H10s")
         return asyncio.run(scan())
     from .session import run_session
     try:

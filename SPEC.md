@@ -5,6 +5,7 @@ Platform:
     It is the reference for the H10's Bluetooth protocol.
     Heart Rate and RR intervals are always recorded. Raw ECG is optional (off by default). Accelerometer is not used.
     Dependencies are installed in a project-local virtual environment (.venv/), never system-wide.
+    Users without coding experience record through a window (Tkinter, part of standard Python) opened by double-clicking a launcher. A terminal mode is kept for developers.
 
 Constraints:
     This lab only has a Polar H10 so here are the constraints of such a device:
